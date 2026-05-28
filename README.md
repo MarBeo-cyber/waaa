@@ -13,7 +13,7 @@
 
 WAAA is an autopoietic agent: a system that continuously monitors its own perceptual capacity, detects degradation, and autonomously recovers — without rule-based thresholds or hard-coded logic. Every decision component is a **learned model** that improves with experience.
 
-WAAA is the predecessor of [MAAA](https://github.com/YOUR_ORG/maaa) — the Metacognitive Autopoietic Adaptive Agent.
+WAAA is the predecessor of [MAAA](https://github.com/MarBeo-cyber/MAAA) — the Metacognitive Autopoietic Adaptive Agent.
 
 ### Architecture A — ML Component Map
 
