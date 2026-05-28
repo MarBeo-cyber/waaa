@@ -136,7 +136,7 @@ WAAA focuses on **self-preservation of the agent's perceptual capacity**. MAAA e
 - 3-level autobiographical memory
 - AR overlay guidance in real-time emergency scenarios
 
-→ [MAAA Repository](https://github.com/YOUR_ORG/maaa)
+→ [MAAA Repository](https://github.com/MarBeo-cyber/MAAA)
 
 ---
 
