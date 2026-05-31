@@ -145,3 +145,49 @@ WAAA focuses on **self-preservation of the agent's perceptual capacity**. MAAA e
 MIT — see [LICENSE](LICENSE).
 
 *Developed in collaboration with Claude (Anthropic)*
+
+---
+
+## Federation as Cognitive Emergence
+
+The most theoretically significant property of the WAAA model is not the individual node but the federated network. The central claim:
+
+> *No node contains the function, but the function emerges from the network.*
+
+This is not a claim about distributing a task that could be performed by a centralised system. It is a claim about genuine emergence — properties that exist in the network but not in any of its parts.
+
+### Why Federation Produces Emergence
+
+**Biographical Reconciliation (BRP):** When two nodes that have operated autonomously reconnect, each has accumulated experience the other lacks. Reconciliation constructs a unified timeline and collective memory that neither node had individually — irreducible to the sum of the parts.
+
+**Federated CUF:** A single node can compute triage priority for its own entities. It cannot compute global priority across the federated system, because that requires distributed information about all entities across all nodes. The optimal triage decision is a property of the network, not the node.
+
+**Absolute biographical resilience:** No geographically localised extreme event can erase the collective memory of the system, because that memory is distributed across physically disjoint nodes. Restoring a node to its initial configuration is a local event — other nodes preserve the collective biography and contribute to reconstruction.
+
+**Formal grounding:** The integrated information Φ (Tononi, 2008) of a federation of WAAA nodes is structurally greater than the sum of the individual Φ values. The connections between nodes create irreducible integration — states of the federated system that cannot be described as a sum of individual states.
+
+---
+
+## Known Architectural Limitations
+
+Empirical testing of three-node federations on independent machines with local Ollama models has revealed two structural bottlenecks:
+
+### 1. Latency
+
+A complete LLM reasoning cycle requires **2–8 seconds** on consumer hardware (even with quantised models). Synchronous BRP across three peer-to-peer nodes multiplies this latency — potentially beyond the sub-second response requirements of many operational BIA scenarios.
+
+### 2. Hardware Requirements
+
+Each Ollama instance requires a minimum of **16 GB RAM** for models of sufficient quality. 4-bit quantisation reduces this but degrades structured JSON output reliability below a critical threshold for the reasoning loop.
+
+### Directions Under Investigation
+
+| Approach | Description |
+|---|---|
+| **Hub-and-spoke topology** | Lightweight ML nodes (Architecture A) at the periphery; single LLM orchestrator for federated decisions |
+| **Async BRP with vector clocks** | Nodes publish biographical events to a shared queue (Redis/NATS); reconciliation runs in background without blocking the reasoning cycle |
+| **Model specialisation by function** | Small fast models (Phi-3 mini, Qwen 1.5B) for synchronisation and routine monitoring; larger models only for critical decisions |
+
+> These are **engineering constraints, not theoretical ones**. The emergent properties of federation are formally demonstrable regardless of the current hardware ceiling. Local LLM inference quality sufficient for WAAA reasoning did not exist three years ago — it improves every quarter.
+
+---
