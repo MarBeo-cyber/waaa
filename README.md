@@ -191,3 +191,24 @@ Each Ollama instance requires a minimum of **16 GB RAM** for models of sufficien
 > These are **engineering constraints, not theoretical ones**. The emergent properties of federation are formally demonstrable regardless of the current hardware ceiling. Local LLM inference quality sufficient for WAAA reasoning did not exist three years ago — it improves every quarter.
 
 ---
+
+---
+
+## The Autopoietic Agent Family
+
+WAAA is the first agent in an evolving family of autopoietic systems — an **artificial ontogenesis** that develops by stages analogous to biological cognitive maturation:
+
+| Agent | Full Name | Core Function | Biological Analogy |
+|---|---|---|---|
+| **WAAA** | Weak Autopoietic Artificial Agent | Perceptual self-monitoring | Sensory reflex calibration |
+| MAAA | Metacognitive Autopoietic Adaptive Agent | Embodied cognition in emergency | Acute stress response |
+| PAAA | Personal Autopoietic Adaptive Agent | Neurofunctional continuity | Homeostasis / immune surveillance |
+| SAAA | Sapient Autopoietic Adaptive Agent | Learning consolidation | Myelination / synaptic plasticity |
+
+**Repositories:**
+- WAAA: https://github.com/MarBeo-cyber/waaa
+- MAAA: https://github.com/MarBeo-cyber/MAAA
+- PAAA: https://github.com/MarBeo-cyber/PAAA
+- SAAA: https://github.com/MarBeo-cyber/SAAA
+
+Each agent extends the previous: MAAA uses WAAA's perceptual loop in shared embodiment scenarios; PAAA can share its neurofunctional profile with MAAA; SAAA integrates the PAAA profile to optimise learning sessions and feeds consolidated knowledge back to MAAA.
