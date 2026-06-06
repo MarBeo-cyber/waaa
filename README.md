@@ -1,3 +1,5 @@
+[![AURA Framework](https://img.shields.io/badge/AURA-Level%201%20%7C%20waaa-1F3864)](https://github.com/MarBeo-cyber/AURA)
+
 # 🤖 WAAA — Weak Autopoietic Artificial Agent
 
 > **Federated ML system for real-time environmental anomaly detection, autonomous threshold calibration, and autopoietic recovery — Architecture A (Full ML)**
