@@ -191,6 +191,8 @@ Each Ollama instance requires a minimum of **16 GB RAM** for models of sufficien
 > These are **engineering constraints, not theoretical ones**. The emergent properties of federation are formally demonstrable regardless of the current hardware ceiling. Local LLM inference quality sufficient for WAAA reasoning did not exist three years ago — it improves every quarter.
 
 ---
+###   Memory Pruning Engine
+The Memory Pruning Engine provides the base primitive that the MAAA level uses to operate on an already-filtered stream. MAAA does not receive raw environmental noise: it receives events that have passed the WAAA's internal coherence threshold. This architectural dependency was implicit in previous versions; v1.4 makes it explicit.
 
 ---
 
