@@ -1,5 +1,20 @@
+"""Memory pruning demo — runnable straight from a clone:
+
+    python examples/run_demo.py
+"""
+
+import os
+import sys
 from datetime import datetime, timedelta
-from waaa_memory.engine import MemoryEvent, InMemoryEventStore, MemoryCompactionEngine
+
+# Allow running from a plain clone, without an install or PYTHONPATH.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from waaa_memory.engine import (  # noqa: E402
+    InMemoryEventStore,
+    MemoryCompactionEngine,
+    MemoryEvent,
+)
 
 store = InMemoryEventStore()
 

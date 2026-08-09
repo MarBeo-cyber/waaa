@@ -17,18 +17,16 @@ import time
 import uuid
 import logging
 import threading
-from dataclasses import dataclass, field
 from typing import Optional
 
 from core.biography import BiographicalEntry, Snapshot
 from core.bia import BIA
 from core.recovery import RecoveryManager, RecoveryLevel
-from ml.autoencoder_scene import AutoencoderSceneModel
 from ml.rl_aptc import RLAPTCAgent, RLAPTCConfig
 from ml.goal_classifier import GoalClassifier
 from ml.recovery_detector import RecoveryLevelDetector
 from ml.vector_biography import VectorBiography
-from sensors.ml_webcam_sensor import MLWebcamSensor, SensorReading
+from sensors.synthetic_scene_sensor import SensorReading, SyntheticSceneSensor
 
 logger = logging.getLogger("waaa.ml.node")
 
@@ -114,8 +112,8 @@ class MLWaaaNode:
         }
         self.recovery_manager = RecoveryManager(self.node_id, initial_config)
 
-        # ── ML: Sensor with Autoencoder ────────────────────────────────
-        self.sensor = MLWebcamSensor(
+        # ── Sensor (synthetic frames) with Autoencoder ─────────────────
+        self.sensor = SyntheticSceneSensor(
             self.node_id,
             model_path=f"{model_dir}/autoencoder.pkl",
         )
@@ -196,6 +194,7 @@ class MLWaaaNode:
                     "noise_level": reading.noise_level,
                     "anomaly_score": reading.anomaly_score,
                     "perceptually_degraded": reading.is_perceptually_degraded,
+                    "scene_model_status": reading.scene_model_status,
                     "autoencoder": self.sensor.scene_model.status,
                 },
                 "aptc": self.aptc.status,
@@ -355,7 +354,7 @@ class MLWaaaNode:
                 if self.sensor.scene_model.frame_buffer else
                 [reading.luminance] * 12
             )
-            adjustments.append(f"updated_autoencoder_expectation")
+            adjustments.append("updated_autoencoder_expectation")
 
         # Mark self as disrupted in BIA
         for entity in self.bia.all_entities():

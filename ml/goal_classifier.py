@@ -1,36 +1,44 @@
 """
-WAAA ML — Goal Classifier
-Replaces the rule-based if/elif goal switching with a Random Forest
-trained on biographical history.
+WAAA ML — Goal selection.
 
-The classifier learns from the node's own experience:
-  - Which combinations of coherence, prediction_error, frame_quality,
-    goal duration, and temporal patterns correspond to which goal
-  - The optimal goal given the full temporal context, not just
-    instantaneous threshold comparisons
+Goal switching is a **deterministic rule** over the node's perceptual
+state — see ``_rule_based_goal``. It is not a learned model, and this
+module does not claim to be one.
 
-Feature engineering includes sliding-window statistics that capture
-temporal patterns the original rule-based system cannot see:
-  - Trend of coherence over last N readings (slope)
-  - Volatility of prediction error
-  - Duration in current goal
-  - Time-of-day features (for seasonality)
+Why there is no classifier here any more
+----------------------------------------
+Earlier versions ran a RandomForest alongside the rule and handed over to
+it after 30 samples. The training labels for that forest were produced by
+``_rule_based_goal`` itself, so the forest could only ever learn to
+imitate the rule it was said to replace — including the very
+``coherence < 0.35`` comparison it was advertised as replacing. Training
+a model on its own baseline's output teaches it nothing the baseline did
+not already encode, so the forest has been removed rather than dressed up.
 
-The model bootstraps from hand-labelled rules and then refines
-itself as biographical data accumulates — a form of self-supervised
-learning grounded in the node's own history.
+Training it on something better would need labels derived from *outcomes*
+— whether the goal chosen at time t actually restored coherence. The node
+records no such outcome signal today, so there is nothing honest to train
+on. Adding one is the natural next step, and it is the reason the
+temporal features below are kept.
+
+Temporal feature engineering
+----------------------------
+``_extract_features`` computes sliding-window statistics that a
+single-reading comparison cannot see: coherence trend (slope), prediction
+error volatility, window means and peaks, time in the current goal, and
+time-of-day terms. These are computed on every prediction and published
+through ``status["last_features"]`` for analysis and for future
+outcome-labelled training. They do **not** feed the goal decision today.
 """
 
-import numpy as np
 import logging
-import time
-import pickle
 import os
+import pickle
+import time
 from collections import deque
 from typing import Optional
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
-from sklearn.exceptions import NotFittedError
+
+import numpy as np
 
 logger = logging.getLogger("waaa.ml.goal_classifier")
 
@@ -41,12 +49,17 @@ GOALS = [
     "execute_recovery",
 ]
 
-# Minimum samples before the classifier is used instead of rules
-MIN_TRAINING_SAMPLES = 30
-# Retrain every N new samples
-RETRAIN_INTERVAL = 20
 # Sliding window for temporal features
 WINDOW_SIZE = 8
+
+FEATURE_NAMES = [
+    "coherence", "pred_error", "frame_quality", "signal_mag",
+    "aptc_theta", "coh_slope", "err_slope", "coh_mean",
+    "coh_std", "err_mean", "err_vol", "qual_mean",
+    "sig_mean", "sig_max", "goal_dur",
+    "goal_monitor", "goal_restore", "goal_recovery",
+    "hour_sin", "hour_cos",
+]
 
 
 def _slope(values: list) -> float:
@@ -62,52 +75,31 @@ def _slope(values: list) -> float:
 
 class GoalClassifier:
     """
-    Random Forest goal classifier with temporal feature engineering.
+    Deterministic goal selector with temporal feature engineering.
 
-    Training data is generated in two ways:
-    1. Bootstrap: rule-based labels on early observations (fast start)
-    2. Biographical: labels derived from the node's own past decisions
-       and their outcomes (self-supervised refinement)
-
-    Once MIN_TRAINING_SAMPLES is reached, the RF replaces the rules.
-    The model is periodically retrained as new data arrives.
+    ``predict()`` applies ``_rule_based_goal`` to the current reading and
+    reports ``method="rule"``. The temporal features are computed on the
+    same call and kept in ``last_features`` for inspection; they are not
+    part of the decision. See the module docstring for why.
     """
 
     def __init__(self, model_path: Optional[str] = None):
-        self.rf = RandomForestClassifier(
-            n_estimators=50,
-            max_depth=6,
-            min_samples_leaf=3,
-            random_state=42,
-            class_weight="balanced",
-        )
-        self.label_encoder = LabelEncoder()
-        self.label_encoder.fit(GOALS)
-
         # Sliding window buffers for temporal features
         self.coherence_window      = deque(maxlen=WINDOW_SIZE)
         self.pred_error_window     = deque(maxlen=WINDOW_SIZE)
         self.frame_quality_window  = deque(maxlen=WINDOW_SIZE)
         self.signal_window         = deque(maxlen=WINDOW_SIZE)
 
-        # Training data accumulator
-        self.X_train: list = []
-        self.y_train: list = []
-
-        self.is_fitted        = False
-        self.sample_count     = 0
-        self.retrain_counter  = 0
+        self.last_features: Optional[np.ndarray] = None
         self.current_goal     = "monitor_anomalies"
         self.goal_start_time  = time.time()
         self.total_predictions = 0
-        self.rf_predictions    = 0
 
         if model_path and os.path.exists(model_path):
             self.load(model_path)
-            logger.info(f"[GoalClassifier] Loaded from {model_path} "
-                        f"(samples={len(self.X_train)})")
+            logger.info(f"[GoalSelector] State loaded from {model_path}")
         else:
-            logger.info("[GoalClassifier] Initialised — bootstrap phase")
+            logger.info("[GoalSelector] Initialised — deterministic rule")
 
     # ------------------------------------------------------------------ #
     # Feature extraction                                                   #
@@ -120,8 +112,11 @@ class GoalClassifier:
                            signal_magnitude: float,
                            aptc_theta: float) -> np.ndarray:
         """
-        Build feature vector for goal classification.
-        Combines instantaneous metrics with temporal window statistics.
+        Build the temporal feature vector for the current reading.
+
+        Combines instantaneous metrics with sliding-window statistics.
+        Published through ``status["last_features"]``; not used by the
+        goal decision (see module docstring).
         """
         # Update sliding windows
         self.coherence_window.append(coherence)
@@ -183,7 +178,7 @@ class GoalClassifier:
         return features
 
     # ------------------------------------------------------------------ #
-    # Rule-based bootstrap (generates initial training labels)            #
+    # The goal decision                                                   #
     # ------------------------------------------------------------------ #
 
     def _rule_based_goal(self,
@@ -191,8 +186,7 @@ class GoalClassifier:
                           prediction_error: float,
                           frame_quality: float) -> str:
         """
-        Original rule-based logic — used for bootstrapping.
-        Generates training labels in the early phase.
+        The goal decision, in full. Deterministic, ordered by severity.
         """
         if coherence < 0.10 or prediction_error > 0.85:
             return "execute_recovery"
@@ -214,59 +208,24 @@ class GoalClassifier:
                 signal_magnitude: float,
                 aptc_theta: float) -> tuple[str, str, float]:
         """
-        Predict the optimal goal for the current state.
-        Returns (goal, method, confidence) where method is
-        'classifier' or 'rules' (bootstrap).
+        Select the goal for the current state.
+
+        Returns ``(goal, method, confidence)``. ``method`` is always
+        "rule". ``confidence`` is always 1.0: the decision is a
+        deterministic function of the inputs, so there is no uncertainty
+        estimate to report — the field is kept because callers unpack it.
         """
         self.total_predictions += 1
-        features = self._extract_features(
+        self.last_features = self._extract_features(
             coherence, prediction_error, frame_quality,
             signal_magnitude, aptc_theta
         )
 
-        # Generate bootstrap label for training
-        rule_label = self._rule_based_goal(
+        goal = self._rule_based_goal(
             coherence, prediction_error, frame_quality
         )
-
-        # Accumulate training data
-        self.X_train.append(features.copy())
-        self.y_train.append(rule_label)
-        self.sample_count += 1
-        self.retrain_counter += 1
-
-        # Retrain periodically
-        if (self.retrain_counter >= RETRAIN_INTERVAL and
-                len(self.X_train) >= MIN_TRAINING_SAMPLES):
-            self._fit()
-            self.retrain_counter = 0
-
-        # Use classifier if fitted, else fall back to rules
-        if self.is_fitted and self.sample_count >= MIN_TRAINING_SAMPLES:
-            try:
-                X = features.reshape(1, -1)
-                pred_encoded = self.rf.predict(X)[0]
-                probas = self.rf.predict_proba(X)[0]
-                goal = self.label_encoder.inverse_transform([pred_encoded])[0]
-                confidence = float(np.max(probas))
-                method = "classifier"
-                self.rf_predictions += 1
-                logger.debug(
-                    f"[GoalClassifier] RF→{goal} "
-                    f"(conf={confidence:.2f}, "
-                    f"coh={coherence:.2f})"
-                )
-            except Exception as e:
-                logger.warning(f"[GoalClassifier] RF failed: {e} → using rules")
-                goal = rule_label
-                confidence = 0.7
-                method = "rules_fallback"
-        else:
-            goal = rule_label
-            confidence = 0.7
-            method = "rules_bootstrap"
-
-        return goal, method, confidence
+        logger.debug(f"[GoalSelector] rule→{goal} (coh={coherence:.2f})")
+        return goal, "rule", 1.0
 
     def update_current_goal(self, goal: str):
         """Called by the node when a goal switch occurs."""
@@ -275,93 +234,41 @@ class GoalClassifier:
             self.goal_start_time = time.time()
 
     # ------------------------------------------------------------------ #
-    # Training                                                             #
-    # ------------------------------------------------------------------ #
-
-    def _fit(self):
-        if len(self.X_train) < MIN_TRAINING_SAMPLES:
-            return
-
-        X = np.array(self.X_train[-500:], dtype=np.float32)  # sliding window
-        y_raw = self.y_train[-500:]
-
-        try:
-            y = self.label_encoder.transform(y_raw)
-            self.rf.fit(X, y)
-            self.is_fitted = True
-
-            # Feature importance log (interpretability)
-            importances = self.rf.feature_importances_
-            top_idx = np.argsort(importances)[::-1][:5]
-            feature_names = [
-                "coherence", "pred_error", "frame_quality", "signal_mag",
-                "aptc_theta", "coh_slope", "err_slope", "coh_mean",
-                "coh_std", "err_mean", "err_vol", "qual_mean",
-                "sig_mean", "sig_max", "goal_dur",
-                "goal_monitor", "goal_restore", "goal_recovery",
-                "hour_sin", "hour_cos",
-            ]
-            top_features = [(feature_names[i], round(importances[i], 3))
-                            for i in top_idx]
-            logger.info(f"[GoalClassifier] Retrained on {len(X)} samples. "
-                        f"Top features: {top_features}")
-
-        except Exception as e:
-            logger.error(f"[GoalClassifier] Training failed: {e}")
-
-    # ------------------------------------------------------------------ #
     # Persistence                                                          #
     # ------------------------------------------------------------------ #
 
     def save(self, path: str):
+        """Persist the little state there is: which goal is active, since
+        when, and how many decisions have been made. No model is stored —
+        the decision rule is code, not data."""
         state = {
-            "rf": self.rf,
-            "label_encoder": self.label_encoder,
-            "X_train": self.X_train[-500:],
-            "y_train": self.y_train[-500:],
-            "is_fitted": self.is_fitted,
-            "sample_count": self.sample_count,
+            "current_goal": self.current_goal,
+            "goal_start_time": self.goal_start_time,
             "total_predictions": self.total_predictions,
-            "rf_predictions": self.rf_predictions,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f)
-        logger.info(f"[GoalClassifier] Saved to {path}")
+        logger.info(f"[GoalSelector] Saved to {path}")
 
     def load(self, path: str):
         with open(path, "rb") as f:
             state = pickle.load(f)
-        self.rf               = state["rf"]
-        self.label_encoder    = state["label_encoder"]
-        self.X_train          = state["X_train"]
-        self.y_train          = state["y_train"]
-        self.is_fitted        = state["is_fitted"]
-        self.sample_count     = state["sample_count"]
-        self.total_predictions= state["total_predictions"]
-        self.rf_predictions   = state["rf_predictions"]
+        self.current_goal      = state.get("current_goal", "monitor_anomalies")
+        self.goal_start_time   = state.get("goal_start_time", time.time())
+        self.total_predictions = state.get("total_predictions", 0)
 
     @property
     def status(self) -> dict:
-        rf_pct = (self.rf_predictions / max(self.total_predictions, 1)) * 100
         return {
-            "is_fitted": self.is_fitted,
-            "sample_count": self.sample_count,
+            "method": "rule",
+            "model": None,
             "total_predictions": self.total_predictions,
-            "rf_predictions": self.rf_predictions,
-            "rf_usage_pct": round(rf_pct, 1),
-            "min_samples_needed": max(0, MIN_TRAINING_SAMPLES - self.sample_count),
             "current_goal": self.current_goal,
-            "feature_importances": (
-                dict(zip(
-                    ["coherence","pred_error","frame_quality","signal_mag",
-                     "aptc_theta","coh_slope","err_slope","coh_mean",
-                     "coh_std","err_mean","err_vol","qual_mean",
-                     "sig_mean","sig_max","goal_dur",
-                     "goal_monitor","goal_restore","goal_recovery",
-                     "hour_sin","hour_cos"],
-                    [round(float(v), 4)
-                     for v in self.rf.feature_importances_]
-                ))
-                if self.is_fitted else {}
+            "goal_duration_s": round(time.time() - self.goal_start_time, 1),
+            "last_features": (
+                {name: round(float(v), 4)
+                 for name, v in zip(FEATURE_NAMES, self.last_features,
+                                    strict=True)}
+                if self.last_features is not None else {}
             ),
         }

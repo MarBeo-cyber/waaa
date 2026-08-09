@@ -42,7 +42,13 @@ N_ACTIONS = len(ACTIONS)
 
 # State discretisation bins
 THETA_BINS       = np.linspace(0.05, 0.95, 10)
-RATE_BINS        = np.array([0, 1, 2, 3, 5, 8, 12, 20])
+# The event rate is an EMA of the events counted in one observation
+# interval, so its range follows observation_interval_steps. The top bins
+# cover long intervals: with the default 12-step interval the measured EMA
+# stays under 12, but a server configured with a wall-clock interval and a
+# fast tick loop reaches the hundreds, and every rate above the last bin
+# used to collapse into a single indistinguishable state.
+RATE_BINS        = np.array([0, 1, 2, 3, 5, 8, 12, 20, 35, 60, 100, 200, 400])
 BLIND_BINS       = np.array([0, 1, 2, 3, 5])
 SATURATED_BINS   = np.array([0, 1, 2, 3])
 COHERENCE_BINS   = np.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
@@ -77,6 +83,13 @@ class RLAPTCConfig:
     theta_0: float = 0.35
     theta_min: float = 0.05
     theta_max: float = 0.95
+    # An observation interval ends after observation_interval_steps
+    # evaluations *or* observation_interval_s seconds, whichever comes
+    # first. The step counter is what makes the agent learn in a short
+    # run: with a wall-clock gate alone a demo that ticks for ten seconds
+    # never closes an interval, never selects an action, and therefore
+    # never performs a single Bellman update.
+    observation_interval_steps: int = 12
     observation_interval_s: float = 12.0
     n_min: int = 1
     n_max: int = 10
@@ -94,6 +107,7 @@ class RLAPTCState:
     phase: str = "initialising"
     interval_start: float = field(default_factory=time.time)
     events_this_interval: int = 0
+    evaluations_this_interval: int = 0
     total_intervals: int = 0
     blind_streak: int = 0
     saturated_streak: int = 0
@@ -154,6 +168,7 @@ class RLAPTCAgent:
         Also tracks events and advances the interval clock.
         """
         self._maybe_advance_interval(coherence)
+        self.state.evaluations_this_interval += 1
         self.state.last_coherence = coherence
 
         is_perturbation = signal_magnitude >= self.state.theta
@@ -176,8 +191,16 @@ class RLAPTCAgent:
     # ------------------------------------------------------------------ #
 
     def _maybe_advance_interval(self, coherence: float):
+        """Close the observation interval on whichever gate trips first.
+
+        Step count and wall clock are both checked so the agent learns at
+        the same rate whether it is driven by a fast demo loop or by a
+        slow real-time deployment.
+        """
         elapsed = time.time() - self.state.interval_start
-        if elapsed >= self.cfg.observation_interval_s:
+        steps = self.state.evaluations_this_interval
+        if (steps >= self.cfg.observation_interval_steps or
+                elapsed >= self.cfg.observation_interval_s):
             self._close_interval(coherence)
 
     def _close_interval(self, coherence: float):
@@ -233,6 +256,7 @@ class RLAPTCAgent:
 
         # Reset interval
         self.state.events_this_interval = 0
+        self.state.evaluations_this_interval = 0
         self.state.interval_start = time.time()
 
         if self.state.total_intervals >= 3:

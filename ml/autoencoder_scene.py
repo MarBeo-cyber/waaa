@@ -19,7 +19,6 @@ This is a genuine learned model: it does not know in advance what
 
 import numpy as np
 import logging
-import time
 import pickle
 import os
 from typing import Optional
@@ -168,12 +167,19 @@ class AutoencoderSceneModel:
                frame: np.ndarray,
                luminance: float,
                noise: float,
-               motion: float) -> tuple[float, float, float]:
+               motion: float) -> Optional[tuple[float, float, float]]:
         """
-        Process one frame. Returns (prediction_error, coherence, anomaly_score).
+        Process one frame.
 
-        During calibration: returns conservative defaults.
-        Once active: returns genuine reconstruction error.
+        Returns (prediction_error, coherence, anomaly_score) once the model
+        is trained, and **None** while it is still warming up — that is,
+        while it is collecting its CALIBRATION_FRAMES worth of frames and
+        has no fitted network to reconstruct anything with.
+
+        None means "not yet trained, no measurement available". Earlier
+        versions returned the constants 0.15 and 0.1 here, which the demo
+        then printed as if they were measured reconstruction error and
+        anomaly score for the whole calibration phase.
         """
         self.frame_count += 1
         features = extract_features(frame, luminance, noise, motion)
@@ -185,17 +191,17 @@ class AutoencoderSceneModel:
 
         # Phase transitions
         if self.phase == "calibrating":
-            if len(self.frame_buffer) >= self.CALIBRATION_FRAMES:
-                self._fit()
-                self.phase = "active"
-                logger.info(f"[Autoencoder] Calibration complete "
-                            f"({self.CALIBRATION_FRAMES} frames). Now active.")
-            # Return conservative defaults during calibration
-            calibration_progress = len(self.frame_buffer) / self.CALIBRATION_FRAMES
-            return 0.15, calibration_progress * 0.6, 0.1
+            if len(self.frame_buffer) < self.CALIBRATION_FRAMES:
+                return None                      # warming up: nothing to report
+            self._fit()
+            self.phase = "active"
+            logger.info(f"[Autoencoder] Calibration complete "
+                        f"({self.CALIBRATION_FRAMES} frames). Now active.")
 
         # Active phase: compute reconstruction error
         error = self._reconstruction_error(features)
+        if error is None:                        # model is not usable yet
+            return None
         self.error_history.append(error)
         if len(self.error_history) > 100:
             self.error_history.pop(0)
@@ -232,16 +238,25 @@ class AutoencoderSceneModel:
 
         return normalised_error, coherence, anomaly_score
 
-    def _reconstruction_error(self, features: np.ndarray) -> float:
-        """Compute MSE between input and reconstructed output."""
+    def _reconstruction_error(self, features: np.ndarray) -> Optional[float]:
+        """MSE between input and reconstructed output, or None if untrained.
+
+        Only NotFittedError is caught: it is the one failure that means
+        "the model is not ready yet", and the answer to it is to report
+        the warming-up state rather than a plausible-looking number. Any
+        other exception is a real fault and must not be swallowed — the
+        previous ``except (NotFittedError, Exception)`` caught everything
+        and returned 0.1.
+        """
         try:
             X = self.scaler.transform(features.reshape(1, -1))
             X_reconstructed = self.autoencoder.predict(X)
-            mse = float(np.mean((X - X_reconstructed) ** 2))
-            return mse
-        except (NotFittedError, Exception) as e:
-            logger.warning(f"[Autoencoder] Reconstruction error: {e}")
-            return 0.1
+            return float(np.mean((X - X_reconstructed) ** 2))
+        except NotFittedError:
+            logger.warning("[Autoencoder] Reconstruction requested before "
+                           "the model was fitted — reporting warming-up state")
+            self.is_fitted = False
+            return None
 
     def _fit(self, incremental: bool = False):
         """Fit or refit the autoencoder on the current frame buffer."""
@@ -310,11 +325,22 @@ class AutoencoderSceneModel:
         self.is_fitted           = state["is_fitted"]
 
     @property
+    def is_warming_up(self) -> bool:
+        """True while the model has no fitted network to score frames with."""
+        return not self.is_fitted
+
+    @property
     def status(self) -> dict:
         return {
             "phase": self.phase,
             "frame_count": self.frame_count,
             "is_fitted": self.is_fitted,
+            "is_warming_up": self.is_warming_up,
+            # Only meaningful while warming up. A model restored from disk is
+            # already fitted even though its frame buffer starts empty.
+            "calibration_frames_remaining": max(
+                0, self.CALIBRATION_FRAMES - len(self.frame_buffer)
+            ) if self.is_warming_up else 0,
             "error_mean": round(self._error_mean, 5),
             "error_std": round(self._error_std, 5),
             "anomaly_threshold": round(self._anomaly_threshold, 5),

@@ -1,7 +1,17 @@
 """
-WAAA ML — Webcam Sensor with Autoencoder Scene Model
-Replaces the rule-based SceneModel with the AutoencoderSceneModel.
-All other sensor behaviour is preserved.
+WAAA ML — Synthetic scene sensor with Autoencoder Scene Model.
+
+**No camera is read anywhere in this module.** Frames are generated
+in-process by ``_synthesise_frame``: a constant luminance plane plus
+Gaussian noise, with the luminance and noise levels chosen by the current
+scene state. There is no cv2 import in this repository and no hardware
+capture path. The sensor exists so the cognitive loop and the models can
+be exercised deterministically; swapping in a real capture device means
+replacing ``_synthesise_frame``.
+
+What *is* real here: the frame statistics (luminance, noise level, frame
+quality) are measured from the generated frame, and the autoencoder that
+scores it is a genuine model fitted on those frames.
 """
 
 import numpy as np
@@ -28,6 +38,11 @@ class SensorReading:
     motion_score: float
     anomaly_score: float = 0.0
     raw_frame: Optional[np.ndarray] = None
+    # "active"      — coherence/prediction_error/anomaly_score come from the
+    #                 fitted autoencoder
+    # "warming_up"  — the autoencoder has no fitted network yet, so those
+    #                 three fields are direct frame statistics instead
+    scene_model_status: str = "active"
 
     @property
     def is_perceptually_degraded(self) -> bool:
@@ -39,16 +54,19 @@ class SensorReading:
                 f"coh={self.coherence:.2f} "
                 f"err={self.prediction_error:.2f} "
                 f"qual={self.frame_quality:.2f} "
-                f"anomaly={self.anomaly_score:.2f}")
+                f"anomaly={self.anomaly_score:.2f} "
+                f"[{self.scene_model_status}]")
 
 
-class MLWebcamSensor:
+class SyntheticSceneSensor:
     """
-    Webcam sensor backed by an MLP Autoencoder for anomaly detection.
+    Synthetic scene sensor backed by an MLP Autoencoder.
 
-    The autoencoder learns the distribution of NORMAL frames during
-    the first CALIBRATION_FRAMES cycles. After that, the reconstruction
-    error replaces hand-coded prediction error formulas.
+    The autoencoder learns the distribution of frames it sees during the
+    first CALIBRATION_FRAMES cycles. After that, the reconstruction error
+    replaces hand-coded prediction error formulas. Until then the sensor
+    reports directly measured frame statistics and marks the reading
+    ``scene_model_status="warming_up"``.
 
     Scene states: NORMAL | DIM | NOISY | RECOVERED
     """
@@ -68,8 +86,9 @@ class MLWebcamSensor:
         # ML scene model
         self.scene_model = AutoencoderSceneModel(model_path=model_path)
 
-        logger.info(f"[MLSensor:{node_id}] Initialised ({width}x{height}) "
-                    f"with AutoencoderSceneModel")
+        logger.info(f"[SyntheticSensor:{node_id}] Initialised ({width}x{height}) "
+                    f"with AutoencoderSceneModel — frames are synthetic, "
+                    f"no camera is read")
 
     def set_scene_state(self, state: str):
         if state not in self.SCENE_STATES:
@@ -114,15 +133,27 @@ class MLWebcamSensor:
         self._frame_count += 1
         frame, luminance, noise, motion = self._synthesise_frame()
 
-        # ML: autoencoder-based prediction error, coherence, anomaly score
-        prediction_error, coherence, anomaly_score = self.scene_model.update(
-            frame, luminance, noise, motion
-        )
-
         # Frame quality: independent of scene model (absolute metric)
         frame_quality = max(0.0, min(1.0,
             0.5 * luminance + 0.5 * (1.0 - noise)
         ))
+
+        # ML: autoencoder-based prediction error, coherence, anomaly score.
+        # update() returns None while the autoencoder is still collecting
+        # calibration frames.
+        assessment = self.scene_model.update(frame, luminance, noise, motion)
+        if assessment is None:
+            # No trained model yet, so there is no reconstruction error to
+            # report. Fall back to statistics measured directly from this
+            # frame and label the reading, so nothing downstream can mistake
+            # these for autoencoder output.
+            scene_model_status = "warming_up"
+            prediction_error = min(1.0, noise)
+            coherence        = max(0.0, 1.0 - noise)
+            anomaly_score    = min(1.0, max(0.0, (0.5 - frame_quality) * 2.0))
+        else:
+            scene_model_status = "active"
+            prediction_error, coherence, anomaly_score = assessment
 
         # Signal magnitude combines autoencoder anomaly score with
         # absolute frame quality degradation
@@ -142,9 +173,10 @@ class MLWebcamSensor:
             motion_score=round(motion, 4),
             anomaly_score=round(anomaly_score, 4),
             raw_frame=frame,
+            scene_model_status=scene_model_status,
         )
 
-        logger.debug(f"[MLSensor:{self.node_id}] {reading.summary}")
+        logger.debug(f"[SyntheticSensor:{self.node_id}] {reading.summary}")
         return reading
 
     def adjust_noise_filter(self, value: float):
@@ -158,5 +190,6 @@ class MLWebcamSensor:
         return {
             "scene_state": self.current_scene_state,
             "frame_count": self._frame_count,
+            "frames_are_synthetic": True,
             "autoencoder": self.scene_model.status,
         }

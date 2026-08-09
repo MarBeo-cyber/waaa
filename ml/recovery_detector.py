@@ -14,6 +14,11 @@ Anomaly score → Recovery level mapping:
   score < 0.7  → L1     (moderate — rollback to snapshot)
   score < 0.85 → L2     (severe — rollback to intermediate)
   score ≥ 0.85 → L3     (critical — full reset)
+
+The score is derived from ``IsolationForest.decision_function``, which is
+positive for states the forest considers inliers and negative for
+outliers, and is rescaled by the spread of the decision values measured
+on the training (healthy) set — see ``_normalise`` below.
 """
 
 import numpy as np
@@ -28,6 +33,9 @@ logger = logging.getLogger("waaa.ml.recovery_detector")
 
 CALIBRATION_SAMPLES = 25
 RETRAIN_INTERVAL    = 40
+
+# Normalised score at which the forest stops calling a state an inlier.
+OUTLIER_BOUNDARY    = 0.50
 
 
 class RecoveryLevelDetector:
@@ -61,6 +69,9 @@ class RecoveryLevelDetector:
         self.retrain_counter = 0
         self.buffer: list    = []
         self.score_history: list = []
+        # Spread of decision_function values over the healthy training set.
+        # Set by _fit(); used to rescale raw decision values to [0,1].
+        self.decision_scale: float = 1.0
 
         if model_path and os.path.exists(model_path):
             self.load(model_path)
@@ -133,23 +144,59 @@ class RecoveryLevelDetector:
         # Isolation Forest scoring
         try:
             X = self.scaler.transform(features.reshape(1, -1))
-            # score_samples returns negative values: more negative = more anomalous
-            raw_score = float(self.iso_forest.score_samples(X)[0])
-            # Normalise to [0,1]: typical range is roughly [-0.5, 0.5]
-            anomaly_score = float(np.clip(0.5 - raw_score, 0.0, 1.0))
+            decision = float(self.iso_forest.decision_function(X)[0])
+            anomaly_score = self._normalise(decision)
         except Exception as e:
             logger.warning(f"[RecoveryDetector] Scoring failed: {e}")
             return self._rule_fallback(coherence, prediction_error, frame_quality)
+
+        if anomaly_score < OUTLIER_BOUNDARY:
+            # The forest recognises the state as part of the healthy
+            # manifold it learned from this node's own history.
+            level = self._score_to_level(anomaly_score)
+        else:
+            # The state is off the manifold. The forest can say *that*,
+            # but not *how far*: an isolation forest trained on a narrow
+            # healthy region isolates every clearly abnormal state at the
+            # same minimum depth, so mild, degraded and severe states all
+            # receive the identical decision value. Severity therefore
+            # comes from the explicit ladder, floored at L0 so a state the
+            # forest rejected can never be reported as healthy.
+            level, anomaly_score = self._rule_fallback(
+                coherence, prediction_error, frame_quality
+            )
+            if level < 0:
+                level, anomaly_score = 0, max(anomaly_score, 0.35)
 
         self.score_history.append(anomaly_score)
         if len(self.score_history) > 100:
             self.score_history.pop(0)
 
-        # Map score to recovery level
-        level = self._score_to_level(anomaly_score)
-
         logger.debug(f"[RecoveryDetector] score={anomaly_score:.3f} → L{level}")
         return level, anomaly_score
+
+    def _normalise(self, decision: float) -> float:
+        """Map an IsolationForest decision value to an anomaly score in [0,1].
+
+        ``decision_function`` is already centred on the forest's own
+        inlier/outlier boundary: it is > 0 for states the forest accepts
+        as normal and < 0 for states it rejects. Dividing by the spread of
+        the decision values seen on the healthy training set turns it into
+        a scale-free quantity, and
+
+            anomaly = 0.5 - 0.5 * decision / decision_scale
+
+        maps a typical healthy state to ~0.0, the inlier/outlier boundary
+        to exactly 0.5, and anything as far outside the boundary as a
+        typical inlier is inside it to 1.0.
+
+        The previous implementation used ``0.5 - score_samples(X)``.
+        ``score_samples`` returns *negative* values (roughly -0.4 to -0.7),
+        so that expression was always ≥ 0.9 and every state — healthy or
+        degraded — mapped to L3.
+        """
+        ratio = decision / max(self.decision_scale, 1e-9)
+        return float(np.clip(0.5 - 0.5 * ratio, 0.0, 1.0))
 
     def _score_to_level(self, score: float) -> int:
         if score < 0.30:
@@ -166,7 +213,12 @@ class RecoveryLevelDetector:
     def _rule_fallback(self, coherence: float,
                         prediction_error: float,
                         frame_quality: float) -> tuple[int, float]:
-        """Rule-based fallback during calibration phase."""
+        """Explicit severity ladder.
+
+        Used in two places: as the whole assessment before the forest has
+        been fitted, and as the severity ranking for states the fitted
+        forest has already rejected as outliers.
+        """
         if coherence < 0.10 or prediction_error > 0.85:
             return 3, 0.90
         elif coherence < 0.20 or prediction_error > 0.70:
@@ -186,8 +238,17 @@ class RecoveryLevelDetector:
             self.scaler.fit(X)
             X_scaled = self.scaler.transform(X)
             self.iso_forest.fit(X_scaled)
+
+            # Reference spread of the decision values on the healthy set.
+            # The 90th percentile is used rather than the max so a single
+            # unusually central training point cannot inflate the scale.
+            train_decisions = self.iso_forest.decision_function(X_scaled)
+            self.decision_scale = max(
+                float(np.percentile(train_decisions, 90)), 1e-3
+            )
             self.is_fitted = True
-            logger.info(f"[RecoveryDetector] Trained on {len(X)} samples")
+            logger.info(f"[RecoveryDetector] Trained on {len(X)} samples "
+                        f"(decision_scale={self.decision_scale:.4f})")
         except Exception as e:
             logger.error(f"[RecoveryDetector] Training failed: {e}")
 
@@ -199,6 +260,7 @@ class RecoveryLevelDetector:
                 "is_fitted": self.is_fitted,
                 "sample_count": self.sample_count,
                 "score_history": self.score_history,
+                "decision_scale": self.decision_scale,
             }, f)
 
     def load(self, path: str):
@@ -209,6 +271,7 @@ class RecoveryLevelDetector:
         self.is_fitted    = state["is_fitted"]
         self.sample_count = state["sample_count"]
         self.score_history= state["score_history"]
+        self.decision_scale = state.get("decision_scale", 1.0)
 
     @property
     def status(self) -> dict:

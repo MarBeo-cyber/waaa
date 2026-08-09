@@ -1,25 +1,31 @@
 """
 WAAA Architecture A — Main Entry Point
-Full ML implementation: Autoencoder + RL-APTC + RandomForest + IsolationForest + VectorBiography
+Autoencoder + RL-APTC + rule-based goal selection + IsolationForest +
+VectorBiography.
 
 Run modes:
-  python main_ml.py demo    — four-phase webcam demo
+  python main_ml.py demo    — four-phase synthetic-scene demo
   python main_ml.py server  — REST API on :5001
   python main_ml.py both    — server + demo simultaneously
 
-The demo shows the ML system learning in real time:
-  - Autoencoder calibrates on NORMAL frames, then detects NOISY as anomalous
-  - RL agent explores threshold adjustments and learns the reward structure
-  - Goal classifier bootstraps from rules, then switches to RF predictions
-  - Isolation Forest builds the healthy-state manifold
-  - Vector biography accumulates embeddings for semantic recall
+What the demo actually shows:
+  - The autoencoder collects 20 frames, fits, and then reports genuine
+    reconstruction error (before that it reports "warming up")
+  - The RL agent closes an observation interval every 12 evaluations,
+    updates its Q-table and moves θ
+  - The goal selector applies its documented rule to every reading
+  - The Isolation Forest builds a healthy-state manifold and flags
+    states that fall off it
+  - The vector biography accumulates embeddings for semantic recall
+
+All sensor frames are synthesised in-process. No camera is read.
 """
 
-import sys
-import time
-import os
 import logging
+import os
+import sys
 import threading
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,15 +35,25 @@ logging.basicConfig(
 logger = logging.getLogger("waaa.ml.main")
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
-import sys
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.ml_node import MLWaaaNode, Goal
-from core.bia import BIA, TargetEntity
-from federation.federation import Federation
-from api.ml_rest_api import create_ml_app
+from api.ml_rest_api import create_ml_app  # noqa: E402
+from core.ml_node import Goal, MLWaaaNode  # noqa: E402
+from federation.federation import Federation  # noqa: E402
 
 DIVIDER = "─" * 72
+
+SYNTHETIC_DATA_BANNER = (
+    "All sensor data is synthetic: frames are generated in-process by "
+    "sensors/synthetic_scene_sensor.py. No camera is read."
+)
+
+# Where the trained models are written. Overridable so the Docker image
+# and scripts/run_ml.sh can point at the mounted ./waaa_models volume.
+DEFAULT_MODEL_DIR = os.environ.get(
+    "WAAA_MODEL_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "waaa_models"),
+)
 
 
 def build_bia_config() -> dict:
@@ -91,7 +107,8 @@ def print_cycle(result: dict, verbose: bool = False):
     ae = s.get("autoencoder", {})
     print(f"  Autoenc  : phase={ae.get('phase','?')}  "
           f"fitted={ae.get('is_fitted','?')}  "
-          f"threshold={ae.get('anomaly_threshold', 0):.4f}")
+          f"threshold={ae.get('anomaly_threshold', 0):.4f}  "
+          f"source={s.get('scene_model_status','?')}")
 
     aptc = result["aptc"]
     print(f"  RL-APTC  : θ={aptc['theta']:.3f}  "
@@ -100,9 +117,8 @@ def print_cycle(result: dict, verbose: bool = False):
           f"reward={aptc['cumulative_reward']:.1f}")
 
     gc = result.get("goal_classifier", {})
-    print(f"  GoalCls  : fitted={gc.get('is_fitted','?')}  "
-          f"samples={gc.get('sample_count','?')}  "
-          f"rf_usage={gc.get('rf_usage_pct','?')}%")
+    print(f"  GoalSel  : method={gc.get('method','?')}  "
+          f"decisions={gc.get('total_predictions','?')}")
 
     rd = result.get("recovery_detector", {})
     print(f"  RecovDet : fitted={rd.get('is_fitted','?')}  "
@@ -126,21 +142,21 @@ def print_cycle(result: dict, verbose: bool = False):
         print(f"\n  {'='*62}")
         print(f"  GOAL SWITCH: {result['previous_goal']}")
         print(f"            → {result['goal']}")
-        gs = result
-        print(f"  Method: {result.get('goal_classifier', {}).get('current_goal', '?')}")
+        print(f"  Method: {result.get('goal_classifier', {}).get('method', '?')}")
         print(f"  {'='*62}")
 
 
 def run_demo(node: MLWaaaNode, federation: Federation):
     print(f"\n{DIVIDER}")
-    print("  WAAA Architecture A — Full ML Demo")
+    print("  WAAA Architecture A — Demo")
     print(f"  Node: {node.node_id}")
-    print(f"  ML components:")
-    print(f"    Autoencoder (MLP)  — scene anomaly detection")
-    print(f"    RL Agent (Q-table) — adaptive threshold calibration")
-    print(f"    Random Forest      — goal switching classifier")
-    print(f"    Isolation Forest   — recovery level detector")
-    print(f"    Vector Biography   — cosine similarity episodic memory")
+    print(f"  {SYNTHETIC_DATA_BANNER}")
+    print("  Components:")
+    print("    Autoencoder (MLP)  — scene anomaly detection (learned)")
+    print("    RL Agent (Q-table) — adaptive threshold calibration (learned)")
+    print("    Isolation Forest   — healthy-manifold detection (learned)")
+    print("    Goal selector      — deterministic rule, not a model")
+    print("    Vector Biography   — cosine similarity episodic memory")
     print(DIVIDER)
 
     phases = [
@@ -149,10 +165,11 @@ def run_demo(node: MLWaaaNode, federation: Federation):
             "scene": "NORMAL",
             "cycles": 15,
             "narrative": (
-                "Autoencoder learns the distribution of normal frames. "
+                "Autoencoder collects its 20 calibration frames, then fits. "
+                "Until it does, readings are marked warming_up and carry "
+                "direct frame statistics, not model output. "
                 "RL agent begins exploring threshold adjustments. "
-                "Goal classifier accumulates bootstrap training samples. "
-                "Isolation Forest builds the healthy-state manifold."
+                "Isolation Forest accumulates healthy samples."
             ),
         },
         {
@@ -163,7 +180,7 @@ def run_demo(node: MLWaaaNode, federation: Federation):
                 "Luminance drops. Autoencoder reconstruction error rises "
                 "as frames diverge from the learned normal distribution. "
                 "RL agent receives negative reward for blind intervals. "
-                "Goal classifier may switch to restore_perceptual_capacity."
+                "The goal rule may switch to restore_perceptual_capacity."
             ),
         },
         {
@@ -172,9 +189,10 @@ def run_demo(node: MLWaaaNode, federation: Federation):
             "cycles": 12,
             "narrative": (
                 "High reconstruction error from autoencoder. "
-                "Isolation Forest detects the state as anomalous. "
-                "Goal classifier (now using RF predictions) switches goal. "
-                "RL agent learns to lower threshold to maintain sensitivity."
+                "Isolation Forest detects the state as off-manifold and "
+                "the severity ladder picks the recovery level. "
+                "RL agent keeps updating Q-values from interval rewards; "
+                "which way θ moves in 47 cycles is not predetermined."
             ),
         },
         {
@@ -184,7 +202,7 @@ def run_demo(node: MLWaaaNode, federation: Federation):
             "narrative": (
                 "Light restored. Autoencoder reconstruction error drops. "
                 "Isolation Forest returns to healthy-state classification. "
-                "Goal classifier returns to monitor_anomalies. "
+                "The goal rule returns to monitor_anomalies. "
                 "Vector biography now contains semantically searchable history."
             ),
         },
@@ -201,7 +219,7 @@ def run_demo(node: MLWaaaNode, federation: Federation):
         node.set_scene(phase["scene"])
         time.sleep(0.1)
 
-        for i in range(phase["cycles"]):
+        for _ in range(phase["cycles"]):
             result = node.tick()
             federation.sync()
             verbose = result.get("goal_switched", False)
@@ -230,8 +248,8 @@ def run_demo(node: MLWaaaNode, federation: Federation):
     print(f"  Snapshots saved      : {len(node.biography.list_snapshots())}")
     print(f"  Recovery events      : {len(node.recovery_manager.recovery_history)}")
 
-    # ML model states
-    print(f"\n  ML Model States:")
+    # Model states
+    print("\n  Model States:")
     ae = node.sensor.scene_model.status
     print(f"    Autoencoder       : phase={ae['phase']} "
           f"fitted={ae['is_fitted']} "
@@ -241,19 +259,23 @@ def run_demo(node: MLWaaaNode, federation: Federation):
     print(f"    RL-APTC           : θ={aptc['theta']:.3f} "
           f"ε={aptc['epsilon']:.3f} "
           f"steps={aptc['total_steps']} "
+          f"intervals={aptc['total_intervals']} "
+          f"ema_rate={aptc['ema_event_rate']:.2f} "
           f"Q_nonzero={aptc['q_table_nonzero']}")
 
     gc = node.goal_classifier.status
-    print(f"    Goal Classifier   : fitted={gc['is_fitted']} "
-          f"samples={gc['sample_count']} "
-          f"rf_usage={gc['rf_usage_pct']}%")
+    print(f"    Goal selector     : method={gc['method']} "
+          f"decisions={gc['total_predictions']} "
+          f"(deterministic rule, no model)")
 
     rd = node.recovery_detector.status
     print(f"    Recovery Detector : fitted={rd['is_fitted']} "
           f"samples={rd['sample_count']}")
 
+    print(f"\n  {SYNTHETIC_DATA_BANNER}")
+
     if all_goal_switches:
-        print(f"\n  Goal Switch Log:")
+        print("\n  Goal Switch Log:")
         for gs in all_goal_switches:
             print(f"    [Cycle {gs['loop']:04d}] {gs['from']}")
             print(f"             → {gs['to']}")
@@ -262,8 +284,7 @@ def run_demo(node: MLWaaaNode, federation: Federation):
 
     # Semantic memory demo
     if node.biography.status["index_size"] > 0 and node.last_reading:
-        print(f"\n  Semantic Memory Demo — find_similar():")
-        r = node.last_reading
+        print("\n  Semantic Memory Demo — find_similar():")
         similar = node.biography.find_similar(
             coherence=0.25,
             prediction_error=0.70,
@@ -272,8 +293,8 @@ def run_demo(node: MLWaaaNode, federation: Federation):
             goal=Goal.RESTORE_PERCEPTION,
             top_k=3,
         )
-        print(f"  Query: low coherence (0.25), high error (0.70), "
-              f"goal=restore_perception")
+        print("  Query: low coherence (0.25), high error (0.70), "
+              "goal=restore_perception")
         if similar:
             for e in similar:
                 print(f"    sim={e.similarity:.3f} | "
@@ -283,11 +304,11 @@ def run_demo(node: MLWaaaNode, federation: Federation):
         else:
             print("    (no similar events yet — needs more cycles)")
 
-    print(f"\n  REST API: http://localhost:5001")
-    print(f"  Try: curl http://localhost:5001/ml/status")
-    print(f"       curl http://localhost:5001/ml/similar")
-    print(f"       curl -X POST http://localhost:5001/scene/NOISY")
-    print(f"       curl -X POST http://localhost:5001/tick/n/20")
+    print("\n  REST API: http://localhost:5001")
+    print("  Try: curl http://localhost:5001/ml/status")
+    print("       curl http://localhost:5001/ml/similar")
+    print("       curl -X POST http://localhost:5001/scene/NOISY")
+    print("       curl -X POST http://localhost:5001/tick/n/20")
     print(DIVIDER)
 
     # Save all models at end of demo
@@ -295,12 +316,11 @@ def run_demo(node: MLWaaaNode, federation: Federation):
     print(f"  Models saved to: {node.model_dir}")
 
 
-def build_system():
+def build_system(model_dir: str = DEFAULT_MODEL_DIR):
     for path in ["/tmp/waaa_ml.db", "/tmp/waaa_ml2.db"]:
         if os.path.exists(path):
             os.remove(path)
 
-    model_dir = "/tmp/waaa_ml_models"
     os.makedirs(model_dir, exist_ok=True)
 
     node = MLWaaaNode(
@@ -333,7 +353,7 @@ def main():
         run_demo(node, federation)
 
     elif mode == "server":
-        print(f"[WAAA-ML] REST API on http://0.0.0.0:5001")
+        print("[WAAA-ML] REST API on http://0.0.0.0:5001")
         print(f"[WAAA-ML] Node: {node.node_id} — Architecture A")
         app.run(host="0.0.0.0", port=5001, debug=False)
 
@@ -346,7 +366,7 @@ def main():
         )
         t.start()
         time.sleep(0.5)
-        print(f"[WAAA-ML] REST API running on http://localhost:5001")
+        print("[WAAA-ML] REST API running on http://localhost:5001")
         run_demo(node, federation)
         print("\n[WAAA-ML] Server running. Ctrl+C to stop.")
         try:
