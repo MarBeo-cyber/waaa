@@ -24,6 +24,7 @@ All sensor frames are synthesised in-process. No camera is read.
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 
@@ -50,6 +51,13 @@ SYNTHETIC_DATA_BANNER = (
 
 # Where the trained models are written. Overridable so the Docker image
 # and scripts/run_ml.sh can point at the mounted ./waaa_models volume.
+# I percorsi di default vivono nella directory temporanea DEL SISTEMA.
+# Scrivere "/tmp/..." a mano funziona su Linux e su Windows finisce in
+# C:\tmp\, che spesso non esiste: il file non si apre e l'errore arriva
+# lontano dalla causa. tempfile.gettempdir() risolve la cosa ovunque.
+DB_PATH_1 = os.path.join(tempfile.gettempdir(), "waaa_ml.db")
+DB_PATH_2 = os.path.join(tempfile.gettempdir(), "waaa_ml2.db")
+
 DEFAULT_MODEL_DIR = os.environ.get(
     "WAAA_MODEL_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "waaa_models"),
@@ -317,7 +325,7 @@ def run_demo(node: MLWaaaNode, federation: Federation):
 
 
 def build_system(model_dir: str = DEFAULT_MODEL_DIR):
-    for path in ["/tmp/waaa_ml.db", "/tmp/waaa_ml2.db"]:
+    for path in [DB_PATH_1, DB_PATH_2]:
         if os.path.exists(path):
             os.remove(path)
 
@@ -325,14 +333,14 @@ def build_system(model_dir: str = DEFAULT_MODEL_DIR):
 
     node = MLWaaaNode(
         node_id="waaa-ml-webcam-01",
-        db_path="/tmp/waaa_ml.db",
+        db_path=DB_PATH_1,
         bia_config=build_bia_config(),
         model_dir=model_dir,
     )
 
     node2 = MLWaaaNode(
         node_id="waaa-ml-webcam-02",
-        db_path="/tmp/waaa_ml2.db",
+        db_path=DB_PATH_2,
         bia_config=build_bia_config(),
         model_dir=model_dir + "_02",
     )

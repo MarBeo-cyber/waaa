@@ -13,6 +13,8 @@ What changes is the intelligence behind each decision:
 rules → learned models.
 """
 
+import os
+import tempfile
 import time
 import uuid
 import logging
@@ -27,6 +29,13 @@ from ml.goal_classifier import GoalClassifier
 from ml.recovery_detector import RecoveryLevelDetector
 from ml.vector_biography import VectorBiography
 from sensors.synthetic_scene_sensor import SensorReading, SyntheticSceneSensor
+
+# I percorsi di default vivono nella directory temporanea DEL SISTEMA.
+# Scrivere "/tmp/..." a mano funziona su Linux e su Windows finisce in
+# C:\tmp\, che spesso non esiste: il file non si apre e l'errore arriva
+# lontano dalla causa. tempfile.gettempdir() risolve la cosa ovunque.
+DEFAULT_DB_PATH   = os.path.join(tempfile.gettempdir(), "waaa_ml.db")
+DEFAULT_MODEL_DIR = os.path.join(tempfile.gettempdir(), "waaa_models")
 
 logger = logging.getLogger("waaa.ml.node")
 
@@ -66,9 +75,9 @@ class MLWaaaNode:
     def __init__(
         self,
         node_id: Optional[str] = None,
-        db_path: str = "/tmp/waaa_ml.db",
+        db_path: str = DEFAULT_DB_PATH,
         bia_config: Optional[dict] = None,
-        model_dir: str = "/tmp/waaa_models",
+        model_dir: str = DEFAULT_MODEL_DIR,
     ):
         self.node_id = node_id or f"waaa-ml-{uuid.uuid4().hex[:8]}"
         self.model_dir = model_dir

@@ -80,11 +80,18 @@ def test_decision_scale_is_learned_at_fit_time():
     det = _fitted_detector()
     assert det.decision_scale > 0.0
     # and it survives a save/load round trip
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".pkl") as fh:
-        det.save(fh.name)
-        restored = RecoveryLevelDetector()
-        restored.load(fh.name)
+
+
+def test_decision_scale_survives_a_save_load_round_trip(tmp_path):
+    # tmp_path, non NamedTemporaryFile: su Windows quest'ultimo tiene il file
+    # aperto in modo esclusivo, quindi save() non riesce a riaprirlo per
+    # scrivere e il test fallisce con PermissionError su un difetto del test,
+    # non del codice. Il resto della suite usa gia' tmp_path.
+    det = _fitted_detector()
+    path = str(tmp_path / "recovery.pkl")
+    det.save(path)
+    restored = RecoveryLevelDetector()
+    restored.load(path)
     assert restored.decision_scale == det.decision_scale
 
 
